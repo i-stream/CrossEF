@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <TargetFramework>net10.0</TargetFramework>
+    <ImplicitUsings>enable</ImplicitUsings>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <!-- EF1001: we intentionally implement IAsyncQueryProvider (public type in an internal namespace). -->
+    <NoWarn>$(NoWarn);EF1001</NoWarn>
+    <Version>0.1.0</Version>
+    <Authors>Angelo Bestetti</Authors>
+    <Description>Cross-DbContext LINQ queries for Entity Framework Core: join entities from different DbContexts (even different databases or providers) in a single LINQ query.</Description>
+    <RepositoryType>git</RepositoryType>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.*" />
+  </ItemGroup>
+
+</Project>

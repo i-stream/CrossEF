@@ -1,0 +1,20 @@
+## .NET / Visual Studio
+bin/
+obj/
+out/
+TestResults/
+artifacts/
+*.user
+*.suo
+.vs/
+.vscode/
+*.nupkg
+*.snupkg
+
+## Local secrets — real connection strings live only on this machine
+connections.local.json
+
+## Rider / ReSharper
+.idea/
+_ReSharper*/
+*.DotSettings.user

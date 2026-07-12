@@ -1,0 +1,8 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/CrossEF/CrossEF.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/CrossEF.Tests/CrossEF.Tests.csproj" />
+  </Folder>
+</Solution>
