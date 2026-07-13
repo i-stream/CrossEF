@@ -117,6 +117,9 @@ internal static class CrossQueryExecutor
         // side they filter, so they execute as SQL instead of forcing a full table fetch.
         normalized = new SingleSidePredicatePushdownVisitor().Visit(normalized)!;
 
+        // Then narrow any join side that the projection never reads down to its key column.
+        normalized = new SingleSideProjectionPushdownVisitor().Visit(normalized)!;
+
         var fragments = FindFragments(normalized);
         var substitutions = new Dictionary<Expression, Expression>();
 
@@ -543,14 +546,8 @@ internal static class CrossQueryExecutor
 
             var outerParameter = resultSelector.Parameters[0];
             var innerParameter = resultSelector.Parameters[1];
-            var memberMap = new Dictionary<MemberInfo, ParameterExpression>();
-            for (var i = 0; i < projection.Members.Count; i++)
-            {
-                if (projection.Arguments[i] == outerParameter || projection.Arguments[i] == innerParameter)
-                    memberMap[NormalizeMember(projection.Members[i])] = (ParameterExpression)projection.Arguments[i];
-            }
-
-            if (memberMap.Count == 0)
+            var memberMap = MapTransparentMembers(resultSelector);
+            if (memberMap is null)
                 return visited;
 
             var rewritten = new TransparentMemberRewriter(predicate.Parameters[0], memberMap).Visit(predicate.Body)!;
@@ -576,55 +573,212 @@ internal static class CrossQueryExecutor
             => Expression.Call(
                 typeof(Queryable), nameof(Queryable.Where), [predicate.Parameters[0].Type],
                 source, Expression.Quote(predicate));
+    }
 
-        private static MemberInfo NormalizeMember(MemberInfo member)
+    /// <summary>
+    /// Narrows the unused side of a cross-context join down to its join key when the projection
+    /// after the join references only the other side, so the database ships a single key column
+    /// instead of full entity rows. Handles both query shapes:
+    /// <c>Join(outer, inner, ok, ik, (o, i) =&gt; f(oneSide))</c> (query syntax with no clause
+    /// between the join and the select) and <c>Join(...).Select(ti =&gt; f(oneSide))</c>
+    /// (transparent identifier). Join multiplicity is preserved: the narrowed side still yields
+    /// one key per row, duplicates included.
+    /// </summary>
+    private sealed class SingleSideProjectionPushdownVisitor : ExpressionVisitor
+    {
+        protected override Expression VisitMethodCall(MethodCallExpression node)
         {
-            // Anonymous-type projections may surface the property getter instead of the property.
-            if (member is MethodInfo method && method.DeclaringType is not null)
+            var visited = (MethodCallExpression)base.VisitMethodCall(node);
+            if (visited.Method.DeclaringType != typeof(Queryable))
+                return visited;
+
+            if (visited.Method.Name == nameof(Queryable.Join) && visited.Arguments.Count == 5)
+                return TryNarrowJoin(visited) ?? visited;
+
+            if (visited.Method.Name == nameof(Queryable.Select)
+                && visited.Arguments.Count == 2
+                && visited.Arguments[0] is MethodCallExpression join
+                && join.Method.DeclaringType == typeof(Queryable)
+                && join.Method.Name == nameof(Queryable.Join)
+                && join.Arguments.Count == 5)
             {
-                foreach (var property in method.DeclaringType.GetProperties())
-                {
-                    if (property.GetMethod == method)
-                        return property;
-                }
+                return TryNarrowSelectOverJoin(visited, join) ?? visited;
             }
 
-            return member;
+            return visited;
         }
 
-        private static bool ReferencesParameter(Expression tree, ParameterExpression parameter)
+        /// <summary>Join whose own result selector references only one side.</summary>
+        private static Expression? TryNarrowJoin(MethodCallExpression join)
         {
-            var probe = new ParameterReferenceProbe(parameter);
-            probe.Visit(tree);
-            return probe.Found;
+            var resultSelector = Unquote(join.Arguments[4]);
+            if (resultSelector is null || resultSelector.Parameters.Count != 2)
+                return null;
+
+            var usesOuter = ReferencesParameter(resultSelector.Body, resultSelector.Parameters[0]);
+            var usesInner = ReferencesParameter(resultSelector.Body, resultSelector.Parameters[1]);
+            if (usesOuter && usesInner)
+                return null;
+
+            return NarrowJoin(join, resultSelector.Body,
+                resultSelector.Parameters[0], resultSelector.Parameters[1], usesInner);
         }
 
-        private sealed class ParameterReferenceProbe(ParameterExpression parameter) : ExpressionVisitor
+        /// <summary>Select over a transparent-identifier join referencing only one side.</summary>
+        private static Expression? TryNarrowSelectOverJoin(MethodCallExpression select, MethodCallExpression join)
         {
-            public bool Found { get; private set; }
+            var selector = Unquote(select.Arguments[1]);
+            var resultSelector = Unquote(join.Arguments[4]);
+            if (selector is null || selector.Parameters.Count != 1 || resultSelector is null)
+                return null;
 
-            protected override Expression VisitParameter(ParameterExpression node)
+            var memberMap = MapTransparentMembers(resultSelector);
+            if (memberMap is null)
+                return null;
+
+            var rewritten = new TransparentMemberRewriter(selector.Parameters[0], memberMap).Visit(selector.Body)!;
+            if (ReferencesParameter(rewritten, selector.Parameters[0]))
+                return null; // projection uses members we could not map back to one side
+
+            var usesOuter = ReferencesParameter(rewritten, resultSelector.Parameters[0]);
+            var usesInner = ReferencesParameter(rewritten, resultSelector.Parameters[1]);
+            if (usesOuter && usesInner)
+                return null;
+
+            return NarrowJoin(join, rewritten,
+                resultSelector.Parameters[0], resultSelector.Parameters[1], usesInner);
+        }
+
+        /// <summary>
+        /// Rebuilds the join with the unused side replaced by <c>side.Select(keySelector)</c>
+        /// and the projection applied as the join's result selector.
+        /// </summary>
+        private static Expression? NarrowJoin(
+            MethodCallExpression join,
+            Expression projectionBody,
+            ParameterExpression outerParameter,
+            ParameterExpression innerParameter,
+            bool usesInner)
+        {
+            if (!SidesUseDistinctProviders(join))
+                return null; // same context: EF translates the whole join itself, leave it alone
+
+            var generics = join.Method.GetGenericArguments(); // TOuter, TInner, TKey, TResult
+            var keyType = generics[2];
+            var keyParameter = Expression.Parameter(keyType, "joinKey");
+            var identity = Expression.Quote(Expression.Lambda(keyParameter, keyParameter));
+
+            if (!usesInner)
             {
-                if (node == parameter)
-                    Found = true;
-                return node;
+                var narrowedInner = Expression.Call(
+                    typeof(Queryable), nameof(Queryable.Select), [generics[1], keyType],
+                    join.Arguments[1], join.Arguments[3]);
+                var newResultSelector = Expression.Lambda(projectionBody, outerParameter, keyParameter);
+                return Expression.Call(
+                    typeof(Queryable), nameof(Queryable.Join),
+                    [generics[0], keyType, keyType, projectionBody.Type],
+                    join.Arguments[0], narrowedInner, join.Arguments[2], identity,
+                    Expression.Quote(newResultSelector));
+            }
+
+            var narrowedOuter = Expression.Call(
+                typeof(Queryable), nameof(Queryable.Select), [generics[0], keyType],
+                join.Arguments[0], join.Arguments[2]);
+            var outerResultSelector = Expression.Lambda(projectionBody, keyParameter, innerParameter);
+            return Expression.Call(
+                typeof(Queryable), nameof(Queryable.Join),
+                [keyType, generics[1], keyType, projectionBody.Type],
+                narrowedOuter, join.Arguments[1], identity, join.Arguments[3],
+                Expression.Quote(outerResultSelector));
+        }
+
+        private static bool SidesUseDistinctProviders(MethodCallExpression join)
+        {
+            var outerProviders = CollectRoots(join.Arguments[0]).Select(r => r.Provider).Distinct().ToList();
+            var innerProviders = CollectRoots(join.Arguments[1]).Select(r => r.Provider).Distinct().ToList();
+            return outerProviders.Count > 0
+                && innerProviders.Count > 0
+                && !outerProviders.Intersect(innerProviders).Any();
+        }
+    }
+
+    // ---------------------------------------------------------------------
+    // Shared pushdown helpers
+    // ---------------------------------------------------------------------
+
+    /// <summary>
+    /// Maps the members of a transparent-identifier projection <c>(o, i) =&gt; new { o, i }</c>
+    /// back to the lambda parameters they capture, or returns null when the result selector is
+    /// not a member-wise projection of its parameters.
+    /// </summary>
+    private static Dictionary<MemberInfo, ParameterExpression>? MapTransparentMembers(LambdaExpression resultSelector)
+    {
+        if (resultSelector.Parameters.Count != 2
+            || resultSelector.Body is not NewExpression { Members: not null } projection)
+        {
+            return null;
+        }
+
+        var map = new Dictionary<MemberInfo, ParameterExpression>();
+        for (var i = 0; i < projection.Members.Count; i++)
+        {
+            if (projection.Arguments[i] is ParameterExpression parameter
+                && resultSelector.Parameters.Contains(parameter))
+            {
+                map[NormalizeMember(projection.Members[i])] = parameter;
             }
         }
 
-        private sealed class TransparentMemberRewriter(
-            ParameterExpression transparentParameter,
-            Dictionary<MemberInfo, ParameterExpression> memberMap) : ExpressionVisitor
-        {
-            protected override Expression VisitMember(MemberExpression node)
-            {
-                if (node.Expression == transparentParameter
-                    && memberMap.TryGetValue(NormalizeMember(node.Member), out var replacement))
-                {
-                    return replacement;
-                }
+        return map.Count == 0 ? null : map;
+    }
 
-                return base.VisitMember(node);
+    private static MemberInfo NormalizeMember(MemberInfo member)
+    {
+        // Anonymous-type projections may surface the property getter instead of the property.
+        if (member is MethodInfo method && method.DeclaringType is not null)
+        {
+            foreach (var property in method.DeclaringType.GetProperties())
+            {
+                if (property.GetMethod == method)
+                    return property;
             }
+        }
+
+        return member;
+    }
+
+    private static bool ReferencesParameter(Expression tree, ParameterExpression parameter)
+    {
+        var probe = new ParameterReferenceProbe(parameter);
+        probe.Visit(tree);
+        return probe.Found;
+    }
+
+    private sealed class ParameterReferenceProbe(ParameterExpression parameter) : ExpressionVisitor
+    {
+        public bool Found { get; private set; }
+
+        protected override Expression VisitParameter(ParameterExpression node)
+        {
+            if (node == parameter)
+                Found = true;
+            return node;
+        }
+    }
+
+    private sealed class TransparentMemberRewriter(
+        ParameterExpression transparentParameter,
+        Dictionary<MemberInfo, ParameterExpression> memberMap) : ExpressionVisitor
+    {
+        protected override Expression VisitMember(MemberExpression node)
+        {
+            if (node.Expression == transparentParameter
+                && memberMap.TryGetValue(NormalizeMember(node.Member), out var replacement))
+            {
+                return replacement;
+            }
+
+            return base.VisitMember(node);
         }
     }
 

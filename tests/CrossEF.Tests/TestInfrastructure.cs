@@ -76,7 +76,8 @@ public sealed class TwoDatabaseFixture : IDisposable
         billing.AddRange(
             new Invoice { Id = 1, CustomerId = 2, Amount = 40m },
             new Invoice { Id = 2, CustomerId = 3, Amount = 60m },
-            new Invoice { Id = 3, CustomerId = 4, Amount = 80m });
+            new Invoice { Id = 3, CustomerId = 4, Amount = 80m },
+            new Invoice { Id = 4, CustomerId = 2, Amount = 45m }); // second invoice for Bob: exercises join multiplicity
         billing.SaveChanges();
     }
 

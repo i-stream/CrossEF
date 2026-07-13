@@ -8,7 +8,7 @@
     <!-- EF1001: we intentionally implement IAsyncQueryProvider (public type in an internal namespace).
          CS1591: XML docs are generated but not every public member is documented yet. -->
     <NoWarn>$(NoWarn);EF1001;CS1591</NoWarn>
-    <Version>0.1.0</Version>
+    <Version>0.2.0</Version>
 
     <!-- NuGet package metadata -->
     <PackageId>CrossEF</PackageId>

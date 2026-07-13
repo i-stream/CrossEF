@@ -23,10 +23,8 @@ var rows = await (from c in crmContext.Customers
 
 ## Installation
 
-Reference the project (or the `CrossEF` package once published):
-
-```xml
-<ProjectReference Include="path/to/src/CrossEF/CrossEF.csproj" />
+```
+dotnet add package CrossEF
 ```
 
 Then import the namespace:
@@ -109,6 +107,17 @@ A `where` that touches **both** sides cannot run on either database, so it execu
 where c1.Name == c2.Name   // runs in memory (correct, just not in SQL)
 ```
 
+### Project one side — the other side ships only its key
+
+When the final projection reads only **one side** of the join, the other side is narrowed to its join-key column in SQL — full rows are never fetched (join multiplicity is preserved, duplicates included):
+
+```csharp
+var rows = await (from c in crm.Customers.AsCrossQuery()
+                  join i in billing.Invoices on c.Id equals i.CustomerId
+                  select new { c.Name })   // Billing only ships Invoices.CustomerId values
+    .ToListAsync();
+```
+
 ### Left joins (`GroupJoin` / `DefaultIfEmpty`)
 
 Left joins work, but fall back to fully materializing each side (no semi-join narrowing):
@@ -160,7 +169,7 @@ If a query (marked or not) only references **one** context, CrossEF hands the wh
 
 ## Performance guidance
 
-- **Put per-context filters before the cross-context boundary** (before `.AsCrossQuery()` or inside the join source) so they translate to SQL. Single-side `where` clauses after the join are pushed down for you; anything else after the boundary runs in memory.
+- **Put per-context filters before the cross-context boundary** (before `.AsCrossQuery()` or inside the join source) so they translate to SQL. Single-side `where` clauses after the join are pushed down for you, and a projection that reads only one side narrows the other side to its key column; anything else after the boundary runs in memory.
 - **Order the join so the smaller / more-filtered side is the outer one.** The outer side is fetched first and its keys drive the semi-join against the inner side.
 - The semi-join optimization applies to `join ... on ... equals ...` with a **simple key** (numeric, string, `Guid`, dates, enums). Composite (anonymous-type) keys and `GroupJoin`/left joins fall back to fully materializing each side.
 - Large key sets are sent in batches of `CrossEfOptions.MaxSemiJoinKeysPerQuery` (default **2000**) to stay below provider limits such as SQL Server's expression services limit:
@@ -188,13 +197,13 @@ If a query (marked or not) only references **one** context, CrossEF hands the wh
 
 - `src/CrossEF` — the library: `CrossQueryable<T>`, `CrossQueryProvider` (an `IAsyncQueryProvider`), and `CrossQueryExecutor` (normalization, fragment planning, semi-join, in-memory stitching).
 - `tests/CrossEF.Tests` — xunit suite running two independent SQLite in-memory databases, including SQL-log assertions that the semi-join and pushdowns really happen.
-- `samples/CrossEF.Sample` — console sample joining two SQL Server databases (copy `connections.local.json.example` to `connections.local.json` and fill in your connection strings).
 
 ## Roadmap
 
 - [x] Key batching for large semi-join key sets (`CrossEfOptions.MaxSemiJoinKeysPerQuery`)
 - [x] Pushdown of a post-join `where` that references only one side of the join
-- [ ] Pushdown of post-join `Select` projections referencing only one side
+- [x] Post-join `Select` referencing only one side: the unused side is narrowed to its key column
+- [ ] Column pruning when the projection reads a subset of both sides
 - [ ] Semi-join support for composite keys (anonymous-type keys) and `GroupJoin` (left joins)
 - [ ] Choose the smaller side as the key source (currently always outer-first)
 - [ ] Same-server fast path for SQL Server (`[OtherDb].dbo.Table` rewrite → one SQL statement)

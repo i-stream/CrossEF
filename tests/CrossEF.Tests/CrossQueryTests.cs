@@ -207,6 +207,82 @@ public class CrossQueryTests(TwoDatabaseFixture fixture) : IClassFixture<TwoData
     }
 
     [Fact]
+    public async Task Projection_of_outer_side_narrows_inner_fetch_to_key_column()
+    {
+        await using var crm = fixture.CreateCrm();
+        await using var billing = fixture.CreateBilling();
+
+        int before;
+        lock (fixture.BillingSqlLog)
+            before = fixture.BillingSqlLog.Count;
+
+        var rows = await (from c1 in crm.Customers.AsCrossQuery()
+                          join i in billing.Invoices on c1.Id equals i.CustomerId
+                          select new { c1.Name })
+            .ToListAsync();
+
+        // Bob has two invoices, Carla one — multiplicity must survive the narrowing.
+        Assert.Equal(["Bob", "Bob", "Carla"], rows.Select(r => r.Name).Order().ToArray());
+
+        List<string> commands;
+        lock (fixture.BillingSqlLog)
+            commands = fixture.BillingSqlLog.Skip(before).ToList();
+        var invoicesQuery = Assert.Single(commands, c => c.Contains("Invoices"));
+        Assert.DoesNotContain("Amount", invoicesQuery); // only the key column was fetched
+    }
+
+    [Fact]
+    public async Task Projection_of_inner_side_narrows_outer_fetch_to_key_column()
+    {
+        await using var crm = fixture.CreateCrm();
+        await using var billing = fixture.CreateBilling();
+
+        int before;
+        lock (fixture.CrmSqlLog)
+            before = fixture.CrmSqlLog.Count;
+
+        var rows = await (from c1 in crm.Customers.AsCrossQuery()
+                          join c2 in billing.Customers on c1.Id equals c2.Id
+                          select new { c2.Country })
+            .ToListAsync();
+
+        Assert.Equal(["DE", "IT"], rows.Select(r => r.Country).Order().ToArray());
+
+        List<string> commands;
+        lock (fixture.CrmSqlLog)
+            commands = fixture.CrmSqlLog.Skip(before).ToList();
+        var crmQuery = Assert.Single(commands, c => c.Contains("Customers"));
+        Assert.DoesNotContain("Country", crmQuery); // outer side fetched only its key
+        Assert.DoesNotContain("Name", crmQuery);
+    }
+
+    [Fact]
+    public async Task Pushed_where_and_narrowed_projection_compose()
+    {
+        await using var crm = fixture.CreateCrm();
+        await using var billing = fixture.CreateBilling();
+
+        int before;
+        lock (fixture.BillingSqlLog)
+            before = fixture.BillingSqlLog.Count;
+
+        var rows = await (from c1 in crm.Customers.AsCrossQuery()
+                          join c2 in billing.Customers on c1.Id equals c2.Id
+                          where c1.Country == "IT"
+                          select c1)
+            .ToListAsync();
+
+        var row = Assert.Single(rows);
+        Assert.Equal("Carla", row.Name);
+
+        List<string> commands;
+        lock (fixture.BillingSqlLog)
+            commands = fixture.BillingSqlLog.Skip(before).ToList();
+        var billingQuery = Assert.Single(commands, c => c.Contains("Customers"));
+        Assert.DoesNotContain("Name", billingQuery); // inner narrowed to key even with entity projection
+    }
+
+    [Fact]
     public async Task Semi_join_batches_large_key_sets()
     {
         var previous = CrossEfOptions.MaxSemiJoinKeysPerQuery;
