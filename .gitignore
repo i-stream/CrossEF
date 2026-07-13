@@ -14,6 +14,9 @@ artifacts/
 ## Local secrets — real connection strings live only on this machine
 connections.local.json
 
+## Local-only sample apps (contain scaffolded internal database schemas)
+samples/
+
 ## Rider / ReSharper
 .idea/
 _ReSharper*/
