@@ -5,16 +5,33 @@
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
     <LangVersion>latest</LangVersion>
-    <!-- EF1001: we intentionally implement IAsyncQueryProvider (public type in an internal namespace). -->
-    <NoWarn>$(NoWarn);EF1001</NoWarn>
+    <!-- EF1001: we intentionally implement IAsyncQueryProvider (public type in an internal namespace).
+         CS1591: XML docs are generated but not every public member is documented yet. -->
+    <NoWarn>$(NoWarn);EF1001;CS1591</NoWarn>
     <Version>0.1.0</Version>
+
+    <!-- NuGet package metadata -->
+    <PackageId>CrossEF</PackageId>
     <Authors>Angelo Bestetti</Authors>
-    <Description>Cross-DbContext LINQ queries for Entity Framework Core: join entities from different DbContexts (even different databases or providers) in a single LINQ query.</Description>
+    <Description>Cross-DbContext LINQ queries for Entity Framework Core: join entities from different DbContexts (even different databases or providers) in a single LINQ query. Filters are pushed down to SQL per context and joins use WHERE-IN semi-joins.</Description>
+    <PackageLicenseExpression>MIT</PackageLicenseExpression>
+    <PackageReadmeFile>README.md</PackageReadmeFile>
+    <PackageProjectUrl>https://github.com/i-stream/CrossEF</PackageProjectUrl>
+    <RepositoryUrl>https://github.com/i-stream/CrossEF</RepositoryUrl>
     <RepositoryType>git</RepositoryType>
+    <PackageTags>entity-framework;efcore;ef-core;linq;cross-database;join;dbcontext;federation;query</PackageTags>
+    <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    <PublishRepositoryUrl>true</PublishRepositoryUrl>
+    <IncludeSymbols>true</IncludeSymbols>
+    <SymbolPackageFormat>snupkg</SymbolPackageFormat>
   </PropertyGroup>
 
   <ItemGroup>
     <PackageReference Include="Microsoft.EntityFrameworkCore" Version="10.0.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <None Include="..\..\README.md" Pack="true" PackagePath="\" />
   </ItemGroup>
 
 </Project>
